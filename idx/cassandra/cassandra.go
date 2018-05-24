@@ -65,7 +65,6 @@ var (
 	numConns                 int
 	writeQueueSize           int
 	protoVer                 int
-	maxStale                 time.Duration
 	pruneInterval            time.Duration
 	updateCassIdx            bool
 	updateInterval           time.Duration
@@ -85,7 +84,6 @@ func ConfigSetup() *flag.FlagSet {
 	casIdx.IntVar(&writeQueueSize, "write-queue-size", 100000, "Max number of metricDefs allowed to be unwritten to cassandra")
 	casIdx.BoolVar(&updateCassIdx, "update-cassandra-index", true, "synchronize index changes to cassandra. not all your nodes need to do this.")
 	casIdx.DurationVar(&updateInterval, "update-interval", time.Hour*3, "frequency at which we should update the metricDef lastUpdate field, use 0s for instant updates")
-	casIdx.DurationVar(&maxStale, "max-stale", 0, "clear series from the index if they have not been seen for this much time.")
 	casIdx.DurationVar(&pruneInterval, "prune-interval", time.Hour*3, "Interval at which the index should be checked for stale series.")
 	casIdx.IntVar(&protoVer, "protocol-version", 4, "cql protocol version to use")
 	casIdx.BoolVar(&createKeyspace, "create-keyspace", true, "enable the creation of the index keyspace and tables, only one node needs this")
@@ -240,7 +238,7 @@ func (c *CasIdx) Init() error {
 	//Rebuild the in-memory index.
 	c.rebuildIndex()
 
-	if maxStale > 0 {
+	if memory.IndexRules.Prunable() {
 		if pruneInterval == 0 {
 			return fmt.Errorf("pruneInterval must be greater then 0")
 		}
@@ -361,39 +359,33 @@ func (c *CasIdx) rebuildIndex() {
 	log.Info("cassandra-idx Rebuilding Memory Index from metricDefinitions in Cassandra")
 	pre := time.Now()
 	var defs []schema.MetricDefinition
-	var staleTs uint32
-	if maxStale != 0 {
-		staleTs = uint32(time.Now().Add(maxStale * -1).Unix())
-	}
-	defs = c.LoadPartitions(cluster.Manager.GetPartitions(), defs, staleTs)
-
+	defs = c.LoadPartitions(cluster.Manager.GetPartitions(), defs, pre)
 	num := c.MemoryIdx.Load(defs)
 	log.Info("cassandra-idx Rebuilding Memory Index Complete. Imported %d. Took %s", num, time.Since(pre))
 }
 
-func (c *CasIdx) Load(defs []schema.MetricDefinition, cutoff uint32) []schema.MetricDefinition {
+func (c *CasIdx) Load(defs []schema.MetricDefinition, now time.Time) []schema.MetricDefinition {
 	iter := c.session.Query("SELECT id, orgid, partition, name, interval, unit, mtype, tags, lastupdate from metric_idx").Iter()
-	return c.load(defs, iter, cutoff)
+	return c.load(defs, iter, now)
 }
 
-func (c *CasIdx) LoadPartitions(partitions []int32, defs []schema.MetricDefinition, cutoff uint32) []schema.MetricDefinition {
+func (c *CasIdx) LoadPartitions(partitions []int32, defs []schema.MetricDefinition, now time.Time) []schema.MetricDefinition {
 	placeholders := make([]string, len(partitions))
 	for i, p := range partitions {
 		placeholders[i] = strconv.Itoa(int(p))
 	}
 	q := fmt.Sprintf("SELECT id, orgid, partition, name, interval, unit, mtype, tags, lastupdate from metric_idx where partition in (%s)", strings.Join(placeholders, ","))
 	iter := c.session.Query(q).Iter()
-	return c.load(defs, iter, cutoff)
+	return c.load(defs, iter, now)
 }
 
-func (c *CasIdx) load(defs []schema.MetricDefinition, iter cqlIterator, cutoff uint32) []schema.MetricDefinition {
+func (c *CasIdx) load(defs []schema.MetricDefinition, iter cqlIterator, now time.Time) []schema.MetricDefinition {
 	defsByNames := make(map[string][]*schema.MetricDefinition)
 	var id, name, unit, mtype string
 	var orgId, interval int
 	var partition int32
 	var lastupdate int64
 	var tags []string
-	cutoff64 := int64(cutoff)
 	for iter.Scan(&id, &orgId, &partition, &name, &interval, &unit, &mtype, &tags, &lastupdate) {
 		mkey, err := schema.MKeyFromString(id)
 		if err != nil {
@@ -422,10 +414,14 @@ func (c *CasIdx) load(defs []schema.MetricDefinition, iter cqlIterator, cutoff u
 		log.Fatal(4, "Could not close iterator: %s", err.Error())
 	}
 
+	indexChecks := memory.IndexRules.Checks(now)
+
 NAMES:
 	for name, defsByName := range defsByNames {
+		irId, _ := memory.IndexRules.Match(name)
+		check := indexChecks[irId]
 		for _, def := range defsByName {
-			if def.LastUpdate >= cutoff64 {
+			if check.Keep || def.LastUpdate >= check.Cutoff {
 				// if one of the defs in a name is not stale, then we'll need to add
 				// all the associated MDs to the defs slice
 				for _, defToAdd := range defsByNames[name] {
@@ -538,19 +534,17 @@ func (c *CasIdx) deleteDefAsync(key schema.MKey, part int32) {
 	}()
 }
 
-func (c *CasIdx) Prune(oldest time.Time) ([]idx.Archive, error) {
-	pre := time.Now()
-	pruned, err := c.MemoryIdx.Prune(oldest)
-	statPruneDuration.Value(time.Since(pre))
+func (c *CasIdx) Prune(now time.Time) ([]idx.Archive, error) {
+	pruned, err := c.MemoryIdx.Prune(now)
+	statPruneDuration.Value(time.Since(now))
 	return pruned, err
 }
 
 func (c *CasIdx) prune() {
 	ticker := time.NewTicker(pruneInterval)
-	for range ticker.C {
-		log.Debug("cassandra-idx: pruning items from index that have not been seen for %s", maxStale.String())
-		staleTs := time.Now().Add(maxStale * -1)
-		_, err := c.Prune(staleTs)
+	for now := range ticker.C {
+		log.Debug("cassandra-idx: pruning items")
+		_, err := c.Prune(now)
 		if err != nil {
 			log.Error(3, "cassandra-idx: prune error. %s", err)
 		}

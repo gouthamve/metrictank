@@ -3,12 +3,14 @@ package memory
 import (
 	"flag"
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/grafana/metrictank/conf"
 	"github.com/grafana/metrictank/errors"
 	"github.com/grafana/metrictank/idx"
 	"github.com/grafana/metrictank/mdata"
@@ -50,6 +52,8 @@ var (
 	matchCacheSize  int
 	TagSupport      bool
 	TagQueryWorkers int // number of workers to spin up when evaluation tag expressions
+	indexRulesFile  string
+	IndexRules      conf.IndexRules
 )
 
 func ConfigSetup() {
@@ -58,7 +62,20 @@ func ConfigSetup() {
 	memoryIdx.BoolVar(&TagSupport, "tag-support", false, "enables/disables querying based on tags")
 	memoryIdx.IntVar(&TagQueryWorkers, "tag-query-workers", 50, "number of workers to spin up to evaluate tag queries")
 	memoryIdx.IntVar(&matchCacheSize, "match-cache-size", 1000, "size of regular expression cache in tag query evaluation")
+	memoryIdx.StringVar(&indexRulesFile, "rules-file", "/etc/metrictank/index-rules.conf", "path to index-rules.conf file")
 	globalconf.Register("memory-idx", memoryIdx)
+}
+
+func ConfigProcess() {
+	// read index-rules.conf
+	var err error
+	IndexRules, err = conf.ReadIndexRules(indexRulesFile)
+	if os.IsNotExist(err) {
+		log.Info("Index-rules.conf file %s does not exist; using defaults", indexRulesFile)
+		IndexRules = conf.NewIndexRules()
+	} else if err != nil {
+		log.Fatal(3, "can't read index-rules file %q: %s", indexRulesFile, err.Error())
+	}
 }
 
 type Tree struct {
@@ -373,11 +390,13 @@ func (m *MemoryIdx) add(def *schema.MetricDefinition) idx.Archive {
 
 	schemaId, _ := mdata.MatchSchema(path, def.Interval)
 	aggId, _ := mdata.MatchAgg(path)
+	irId, _ := IndexRules.Match(path)
 	sort.Strings(def.Tags)
 	archive := &idx.Archive{
 		MetricDefinition: *def,
 		SchemaId:         schemaId,
 		AggId:            aggId,
+		IrId:             irId,
 	}
 
 	if TagSupport && len(def.Tags) > 0 {
@@ -915,7 +934,7 @@ func (m *MemoryIdx) Find(orgId uint32, pattern string, from int64) ([]idx.Node, 
 						log.Debug("memory-idx: from is %d, so skipping %s which has LastUpdate %d", from, def.Id, def.LastUpdate)
 						continue
 					}
-					log.Debug("memory-idx Find: adding to path %s archive id=%s name=%s int=%d schemaId=%d aggId=%d lastSave=%d", n.Path, def.Id, def.Name, def.Interval, def.SchemaId, def.AggId, def.LastSave)
+					log.Debug("memory-idx Find: adding to path %s archive id=%s name=%s int=%d schemaId=%d aggId=%d irId=%d lastSave=%d", n.Path, def.Id, def.Name, def.Interval, def.SchemaId, def.AggId, def.IrId, def.LastSave)
 					idxNode.Defs = append(idxNode.Defs, *def)
 				}
 				if len(idxNode.Defs) == 0 {
@@ -1225,9 +1244,8 @@ func (m *MemoryIdx) delete(orgId uint32, n *Node, deleteEmptyParents, deleteChil
 	return deletedDefs
 }
 
-// delete series from the index if they have not been seen since "oldest"
-func (m *MemoryIdx) Prune(oldest time.Time) ([]idx.Archive, error) {
-	oldestUnix := oldest.Unix()
+// Prune prunes series from the index if they have become stale per their index-rule
+func (m *MemoryIdx) Prune(now time.Time) ([]idx.Archive, error) {
 	orgs := make(map[uint32]struct{})
 	log.Info("memory-idx: pruning stale metricDefs across all orgs")
 	m.RLock()
@@ -1251,9 +1269,13 @@ func (m *MemoryIdx) Prune(oldest time.Time) ([]idx.Archive, error) {
 	pre := time.Now()
 
 	m.RLock()
+
+	// getting all checks once saves having to recompute the cutoff everytime we have a match
+	indexChecks := IndexRules.Checks(now)
 DEFS:
 	for _, def := range m.defById {
-		if def.LastUpdate >= oldestUnix {
+		check := indexChecks[def.IrId]
+		if check.Keep || def.LastUpdate >= check.Cutoff {
 			continue DEFS
 		}
 
@@ -1269,7 +1291,7 @@ DEFS:
 			}
 
 			for _, id := range n.Defs {
-				if m.defById[id].LastUpdate >= oldestUnix {
+				if m.defById[id].LastUpdate >= check.Cutoff {
 					continue DEFS
 				}
 			}
@@ -1280,7 +1302,7 @@ DEFS:
 			// if any other MetricDef with the same tag set is not expired yet,
 			// then we do not want to prune any of them
 			for def := range defs {
-				if def.LastUpdate >= oldestUnix {
+				if def.LastUpdate >= check.Cutoff {
 					continue DEFS
 				}
 			}

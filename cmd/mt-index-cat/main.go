@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/grafana/metrictank/cmd/mt-index-cat/out"
+	"github.com/grafana/metrictank/conf"
 	"github.com/grafana/metrictank/idx/cassandra"
+	"github.com/grafana/metrictank/idx/memory"
 	"github.com/raintank/dur"
 	"github.com/raintank/schema"
 )
@@ -158,14 +161,22 @@ func main() {
 		perror(err)
 	}
 
-	var cutoff uint32
+	memory.IndexRules = conf.IndexRules{
+		Rules: nil,
+		Default: conf.IndexRule{
+			Name:     "default",
+			Pattern:  regexp.MustCompile(""),
+			MaxStale: 0,
+		},
+	}
+
 	if maxAge != "0" {
 		maxAgeInt, err := dur.ParseNDuration(maxAge)
 		perror(err)
-		cutoff = uint32(time.Now().Unix() - int64(maxAgeInt))
+		memory.IndexRules.Default.MaxStale = time.Duration(maxAgeInt) * time.Second
 	}
 
-	defs := idx.Load(nil, cutoff)
+	defs := idx.Load(nil, time.Now())
 	// set this after doing the query, to assure age can't possibly be negative
 	out.QueryTime = time.Now().Unix()
 	total := len(defs)

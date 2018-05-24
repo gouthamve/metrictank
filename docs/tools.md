@@ -106,8 +106,6 @@ cass config flags:
     	comma separated list of cassandra addresses in host:port form (default "localhost:9042")
   -keyspace string
     	Cassandra keyspace to store metricDefinitions in. (default "metrictank")
-  -max-stale duration
-    	clear series from the index if they have not been seen for this much time.
   -num-conns int
     	number of concurrent connections to cassandra (default 10)
   -password string
@@ -593,8 +591,6 @@ cass config flags:
     	comma separated list of cassandra addresses in host:port form (default "localhost:9042")
   -keyspace string
     	Cassandra keyspace to store metricDefinitions in. (default "metrictank")
-  -max-stale duration
-    	clear series from the index if they have not been seen for this much time.
   -num-conns int
     	number of concurrent connections to cassandra (default 10)
   -password string
