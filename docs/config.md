@@ -459,6 +459,7 @@ index-rules-conf = /etc/metrictank/index-rules.conf
 [default]
 pattern = 
 max-stale = 0
+```
 
 # storage-aggregation.conf
 
