@@ -1268,14 +1268,15 @@ func (m *MemoryIdx) Prune(now time.Time) ([]idx.Archive, error) {
 	}
 	pre := time.Now()
 
+	// getting all cutoffs once saves having to recompute everytime we have a match
+	cutoffs := IndexRules.Cutoffs(now)
+
 	m.RLock()
 
-	// getting all checks once saves having to recompute the cutoff everytime we have a match
-	indexChecks := IndexRules.Checks(now)
 DEFS:
 	for _, def := range m.defById {
-		check := indexChecks[def.IrId]
-		if check.Keep || def.LastUpdate >= check.Cutoff {
+		cutoff := cutoffs[def.IrId]
+		if def.LastUpdate >= cutoff {
 			continue DEFS
 		}
 
@@ -1291,7 +1292,7 @@ DEFS:
 			}
 
 			for _, id := range n.Defs {
-				if m.defById[id].LastUpdate >= check.Cutoff {
+				if m.defById[id].LastUpdate >= cutoff {
 					continue DEFS
 				}
 			}
@@ -1302,7 +1303,7 @@ DEFS:
 			// if any other MetricDef with the same tag set is not expired yet,
 			// then we do not want to prune any of them
 			for def := range defs {
-				if def.LastUpdate >= check.Cutoff {
+				if def.LastUpdate >= cutoff {
 					continue DEFS
 				}
 			}
