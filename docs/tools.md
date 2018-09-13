@@ -68,6 +68,8 @@ global config flags:
     	max age (last update diff with now) of metricdefs.  use 0 to disable (default "6h30min")
   -prefix string
     	only show metrics that have this prefix
+  -regex string
+    	only show metrics that match this regex
   -substr string
     	only show metrics that have this substring
   -suffix string

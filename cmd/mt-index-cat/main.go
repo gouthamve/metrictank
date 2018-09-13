@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +28,8 @@ func main() {
 	var prefix string
 	var substr string
 	var suffix string
+	var regexStr string
+	var regex *regexp.Regexp
 	var tags string
 	var from string
 	var maxAge string
@@ -38,6 +41,7 @@ func main() {
 	globalFlags.StringVar(&prefix, "prefix", "", "only show metrics that have this prefix")
 	globalFlags.StringVar(&substr, "substr", "", "only show metrics that have this substring")
 	globalFlags.StringVar(&suffix, "suffix", "", "only show metrics that have this suffix")
+	globalFlags.StringVar(&regexStr, "regex", "", "only show metrics that match this regex")
 	globalFlags.StringVar(&tags, "tags", "", "tag filter. empty (default), 'some', 'none', 'valid', or 'invalid'")
 	globalFlags.StringVar(&from, "from", "30min", "for vegeta outputs, will generate requests for data starting from now minus... eg '30min', '5h', '14d', etc. or a unix timestamp")
 	globalFlags.StringVar(&maxAge, "max-age", "6h30min", "max age (last update diff with now) of metricdefs.  use 0 to disable")
@@ -114,6 +118,7 @@ func main() {
 			}
 		}
 	}
+
 	if !found {
 		log.Printf("invalid output %q", format)
 		flag.Usage()
@@ -140,6 +145,15 @@ func main() {
 	globalFlags.Parse(os.Args[1:cassI])
 	cassFlags.Parse(os.Args[cassI+1 : len(os.Args)-1])
 	cassandra.Enabled = true
+
+	if regexStr != "" {
+		var err error
+		regex, err = regexp.Compile(regexStr)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+	}
 
 	var show func(d schema.MetricDefinition)
 
@@ -196,6 +210,9 @@ func main() {
 			continue
 		}
 		if tags == "some" && len(d.Tags) == 0 {
+			continue
+		}
+		if regex != nil && !regex.MatchString(d.Name) {
 			continue
 		}
 		if tags == "valid" || tags == "invalid" {
