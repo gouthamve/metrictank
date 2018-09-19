@@ -24,9 +24,21 @@ func (rw *TracingResponseWriter) Write(b []byte) (int, error) {
 	return rw.ResponseWriter.Write(b)
 }
 
+func DisableTracing(c *Context) {
+	c.Data["noTrace"] = true
+}
+
 // Tracer returns a middleware that traces requests
 func Tracer(tracer opentracing.Tracer) macaron.Handler {
 	return func(macCtx *macaron.Context) {
+
+		// if tracing has been disabled by the DisableTrace() middleware
+		// we skip directly forward the request to the next middleware
+		// and bypass all tracing-related stuff
+		if noTrace, ok := macCtx.Data["noTrace"]; ok && noTrace.(bool) {
+			macCtx.Next()
+			return
+		}
 
 		path := pathSlug(macCtx.Req.URL.Path)
 		// graphite cluster requests use local=1
